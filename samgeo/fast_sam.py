@@ -37,11 +37,12 @@ class SamGeo(FastSAM):
         }
 
         if model not in models:
-            raise ValueError(
-                f"Model must be one of {list(models.keys())}, but got {model} instead."
-            )
-
-        model_path = os.path.join(checkpoint_dir, model)
+            model_path = model
+            # raise ValueError(
+            #     f"Model must be one of {list(models.keys())}, but got {model} instead."
+            # )
+        else:
+            model_path = os.path.join(checkpoint_dir, model)
 
         if not os.path.exists(model_path):
             print(f"Downloading {model} to {model_path}...")
