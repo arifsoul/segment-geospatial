@@ -1,6 +1,6 @@
 segment-anything-py
 segment-anything-hq
-opencv-python 
+opencv-python-headless
 pycocotools 
 matplotlib 
 huggingface_hub

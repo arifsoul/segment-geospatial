@@ -32,6 +32,8 @@ class SamGeo(FastSAM):
         models = {
             "FastSAM-x.pt": "https://drive.google.com/file/d/1m1sjY4ihXBU1fZXdQ-Xdj-mDltW-2Rqv/view?usp=sharing",
             "FastSAM-s.pt": "https://drive.google.com/file/d/10XmSj6mmpmRb8NhXbtiuO9cTTBwR_9SV/view?usp=sharing",
+            # "yolov8x-seg.pt": "https://drive.google.com/file/d/1-RagNdukrfEL665enusMxUupaFki-BWd/view?usp=sharing",
+            "yolov8x-seg.pt": "https://drive.google.com/file/d/1HeqLQSlFcFspFhly2ro0dLtDtS0pcXTF/view?usp=sharing",
         }
 
         if model not in models:
@@ -45,7 +47,8 @@ class SamGeo(FastSAM):
             print(f"Downloading {model} to {model_path}...")
             download_file(models[model], model_path)
 
-        super().__init__(model, **kwargs)
+        # super().__init__(model, **kwargs)
+        super().__init__(model_path, **kwargs)
 
     def set_image(self, image, device=None, **kwargs):
         """Set the input image.
