@@ -5,6 +5,7 @@ https://github.com/opengeos/FastSAM
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import os
 from .common import *
 
 try:
@@ -21,6 +22,7 @@ class SamGeo(FastSAM):
     def __init__(self, model="FastSAM-x.pt", **kwargs):
         """Initialize the FastSAM algorithm."""
 
+        # Define where to store downloaded models or look for existing ones
         if "checkpoint_dir" in kwargs:
             checkpoint_dir = kwargs["checkpoint_dir"]
             kwargs.pop("checkpoint_dir")
@@ -29,27 +31,30 @@ class SamGeo(FastSAM):
                 "TORCH_HOME", os.path.expanduser("~/.cache/torch/hub/checkpoints")
             )
 
+        # Predefined models and their download URLs
         models = {
-            "FastSAM-x.pt": "https://drive.google.com/file/d/1m1sjY4ihXBU1fZXdQ-Xdj-mDltW-2Rqv/view?usp=sharing",
-            "FastSAM-s.pt": "https://drive.google.com/file/d/10XmSj6mmpmRb8NhXbtiuO9cTTBwR_9SV/view?usp=sharing",
-            # "yolov8x-seg.pt": "https://drive.google.com/file/d/1-RagNdukrfEL665enusMxUupaFki-BWd/view?usp=sharing",
+            "FastSAM-x.pt": "https://github.com/opengeos/datasets/releases/download/models/FastSAM-x.pt",
+            "FastSAM-s.pt": "https://github.com/opengeos/datasets/releases/download/models/FastSAM-s.pt",
             "yolov8x-seg.pt": "https://drive.google.com/file/d/1HeqLQSlFcFspFhly2ro0dLtDtS0pcXTF/view?usp=sharing",
         }
 
-        if model not in models:
-            model_path = model
-            # raise ValueError(
-            #     f"Model must be one of {list(models.keys())}, but got {model} instead."
-            # )
-        else:
+        # Determine model path or validate
+        if model in models:
             model_path = os.path.join(checkpoint_dir, model)
+            if not os.path.exists(model_path):
+                print(f"Downloading {model} to {model_path}...")
+                download_file(models[model], model_path)
+        elif os.path.exists(model):
+            model_path = model
+        else:
+            raise ValueError(
+                f"Model must be one of {list(models.keys())} or a valid path, but got '{model}' instead."
+            )
 
-        if not os.path.exists(model_path):
-            print(f"Downloading {model} to {model_path}...")
-            download_file(models[model], model_path)
-
-        # super().__init__(model, **kwargs)
-        super().__init__(model_path, **kwargs)
+        # Assign the correct model path and initialize FastSAM
+        self.model_path = model_path
+        super().__init__(model=self.model_path, **kwargs)
+        print(f"Model initialized: {self.model_path}")
 
     def set_image(self, image, device=None, **kwargs):
         """Set the input image.
