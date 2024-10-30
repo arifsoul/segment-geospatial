@@ -13,7 +13,7 @@ import pyproj
 import rasterio
 import geopandas as gpd
 import matplotlib.pyplot as plt
-
+import json
 
 def is_colab():
     """Tests if the code is being executed within Google Colab."""
@@ -1315,13 +1315,108 @@ def raster_to_vector(source, output, simplify_tolerance=None, dst_crs=None, **kw
             i["geometry"] = i["geometry"].simplify(tolerance=simplify_tolerance)
 
     gdf = gpd.GeoDataFrame.from_features(fc)
+    # Set CRS from source, or specify new CRS
     if src.crs is not None:
         gdf.set_crs(crs=src.crs, inplace=True)
+    else:
+        print(f"Warning: Source does not have a CRS. Setting default CRS to {dst_crs}.")
+        gdf.set_crs(dst_crs, inplace=True)
 
+    # Reproject to desired CRS if specified
     if dst_crs is not None:
         gdf = gdf.to_crs(dst_crs)
 
+    # Save as GeoJSON
     gdf.to_file(output, **kwargs)
+
+
+
+def raster_to_vector_classes(source, output, simplify_tolerance=None, dst_crs=None, **kwargs):
+    
+    from rasterio import features
+    from shapely.geometry import shape as shapely_shape
+
+    """Convert a raster dataset to vector format (GeoJSON) with metadata for each band.
+
+    Args:
+        source (str): Path to the input TIFF file.
+        output (str): Path to the output GeoJSON file.
+        simplify_tolerance (float, optional): Maximum allowed geometry displacement for simplification.
+        dst_crs (str, optional): Coordinate reference system for the output.
+    """
+
+    with rasterio.open(source) as src:
+        band = src.read()
+
+        mask = band != 0
+        shapes = features.shapes(band, mask=mask, transform=src.transform)
+        metadata = src.tags()
+        class_index = json.loads(metadata.get("class_index", "[]"))
+        confidence = json.loads(metadata.get("confidence", "[]"))
+        class_names = json.loads(metadata.get("class_names", "[]"))
+        bbox_data = json.loads(metadata.get("bbox_data", "[]"))
+        annotations = json.loads(metadata.get("annotations", "[]"))
+
+        features_list = []
+
+        # Append each shape as a Feature
+        for num, (geom_shape, value) in enumerate(shapes):  # Fix: correctly unpacking shapes tuple
+            geom = shapely_shape(geom_shape)
+
+            # Ensure geometry is a Polygon or MultiPolygon
+            if geom.geom_type == 'Polygon':
+                coordinates = [list(geom.exterior.coords)]
+            elif geom.geom_type == 'MultiPolygon':
+                coordinates = [list(poly.exterior.coords) for poly in geom.geoms]
+            else:
+                continue  # Skip geometries that are not Polygon or MultiPolygon
+
+            # Map properties based on raster values and metadata for this band
+            properties = {
+                "index": num,
+                "class_name": class_names[num] if num < len(class_names) else None,
+                "confidence": round(float(confidence[num]), 2) * 100 if num < len(confidence) else None
+            }
+
+            # Append feature to the list
+            features_list.append({
+                "type": "Feature",
+                "geometry": {
+                    "type": geom.geom_type,
+                    "coordinates": coordinates,
+                },
+                "properties": properties,
+            })
+
+        # Simplify geometry if tolerance is specified
+        if simplify_tolerance is not None:
+            for feature in features_list:
+                geom = shapely_shape(feature["geometry"])
+                simplified_geom = geom.simplify(tolerance=simplify_tolerance)
+                feature["geometry"]["coordinates"] = [list(simplified_geom.exterior.coords)]
+
+        # Create a FeatureCollection
+        geojson_output = {
+            "type": "FeatureCollection",
+            "features": features_list
+        }
+
+        # Convert to GeoDataFrame
+        gdf = gpd.GeoDataFrame.from_features(geojson_output["features"])
+
+        # Set CRS from source, or specify new CRS
+        if src.crs is not None:
+            gdf.set_crs(crs=src.crs, inplace=True)
+        else:
+            print(f"Warning: Source does not have a CRS. Setting default CRS to {dst_crs}.")
+            gdf.set_crs(dst_crs, inplace=True)
+
+        # Reproject to desired CRS if specified
+        if dst_crs is not None:
+            gdf = gdf.to_crs(dst_crs)
+
+        # Save as GeoJSON
+        gdf.to_file(output, **kwargs)
 
 
 def raster_to_gpkg(tiff_path, output, simplify_tolerance=None, **kwargs):
@@ -1527,6 +1622,121 @@ def array_to_image(
         img = Image.fromarray(array)
         img.save(output, **kwargs)
 
+def array_to_image_classes(
+    array, 
+    output, 
+    source=None, 
+    dtype=None, 
+    compress="deflate",
+    masks=None,
+    class_index=None,
+    confidence=None,
+    class_names=None,
+    bbox_data=None,
+    annotations=None, 
+    **kwargs
+):
+    """Save a NumPy array as a GeoTIFF using the projection information from an existing GeoTIFF file.
+
+    Args:
+        array (np.ndarray): The NumPy array to be saved as a GeoTIFF.
+        output (str): The path to the output image.
+        source (str, optional): The path to an existing GeoTIFF file with map projection information. Defaults to None.
+        dtype (np.dtype, optional): The data type of the output array. Defaults to None.
+        compress (str, optional): The compression method. Can be one of the following: "deflate", "lzw", "packbits", "jpeg". Defaults to "deflate".
+    """
+
+    from PIL import Image
+
+    if isinstance(array, str) and os.path.exists(array):
+        array = cv2.imread(array)
+        array = cv2.cvtColor(array, cv2.COLOR_BGR2RGB)
+
+    if output.endswith(".tif") and source is not None:
+        with rasterio.open(source) as src:
+            crs = src.crs
+            transform = src.transform
+            if compress is None:
+                compress = src.compression
+
+        # Determine the minimum and maximum values in the array
+
+        min_value = np.min(array)
+        max_value = np.max(array)
+
+        if dtype is None:
+            # Determine the best dtype for the array
+            if min_value >= 0 and max_value <= 1:
+                dtype = np.float32
+            elif min_value >= 0 and max_value <= 255:
+                dtype = np.uint8
+            elif min_value >= -128 and max_value <= 127:
+                dtype = np.int8
+            elif min_value >= 0 and max_value <= 65535:
+                dtype = np.uint16
+            elif min_value >= -32768 and max_value <= 32767:
+                dtype = np.int16
+            else:
+                dtype = np.float64
+
+        # Convert the array to the best dtype
+        array = array.astype(dtype)
+
+        # Define the GeoTIFF metadata
+        if array.ndim == 2:
+            metadata = {
+                "driver": "GTiff",
+                "height": array.shape[0],
+                "width": array.shape[1],
+                "count": 1,
+                "dtype": array.dtype,
+                "crs": crs,
+                "transform": transform,
+                "class_index":class_index,
+                "confidence":confidence,
+                "class_names":class_names,
+                "bbox_data":bbox_data,
+                "annotations":annotations, 
+            }
+        elif array.ndim == 3:
+            metadata = {
+                "driver": "GTiff",
+                "height": array.shape[0],
+                "width": array.shape[1],
+                "count": array.shape[2],
+                "dtype": array.dtype,
+                "crs": crs,
+                "transform": transform,
+                "class_index":class_index,
+                "confidence":confidence,
+                "class_names":class_names,
+                "bbox_data":bbox_data,
+                "annotations":annotations, 
+            }
+
+        if compress is not None:
+            metadata["compress"] = compress
+        else:
+            raise ValueError("Array must be 2D or 3D.")
+
+        # Create a new GeoTIFF file and write the array to it
+        with rasterio.open(output, "w", **metadata) as dst:
+            dst.update_tags(
+                class_index=class_index,
+                confidence=confidence,
+                class_names=class_names,
+                bbox_data=bbox_data,
+                annotations=annotations)
+            
+            if array.ndim == 2:
+                dst.write(array, 1)
+            elif array.ndim == 3:
+                for i in range(array.shape[2]):
+                    dst.write(array[:, :, i], i + 1)
+
+    else:
+        img = Image.fromarray(array)
+        img.save(output, **kwargs)
 
 def show_image(
     source, figsize=(12, 10), cmap=None, axis="off", fig_args={}, show_args={}, **kwargs

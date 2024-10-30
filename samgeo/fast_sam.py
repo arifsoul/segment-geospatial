@@ -5,6 +5,8 @@ https://github.com/opengeos/FastSAM
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import rasterio
+from rasterio.transform import from_origin
 from .common import *
 
 try:
@@ -21,6 +23,7 @@ class SamGeo(FastSAM):
     def __init__(self, model="FastSAM-x.pt", **kwargs):
         """Initialize the FastSAM algorithm."""
 
+        # Define where to store downloaded models or look for existing ones
         if "checkpoint_dir" in kwargs:
             checkpoint_dir = kwargs["checkpoint_dir"]
             kwargs.pop("checkpoint_dir")
@@ -29,23 +32,30 @@ class SamGeo(FastSAM):
                 "TORCH_HOME", os.path.expanduser("~/.cache/torch/hub/checkpoints")
             )
 
+        # Predefined models and their download URLs
         models = {
             "FastSAM-x.pt": "https://github.com/opengeos/datasets/releases/download/models/FastSAM-x.pt",
             "FastSAM-s.pt": "https://github.com/opengeos/datasets/releases/download/models/FastSAM-s.pt",
+            "yolov8x-seg.pt": "https://drive.google.com/file/d/1HeqLQSlFcFspFhly2ro0dLtDtS0pcXTF/view?usp=sharing",
         }
 
-        if model not in models:
+        # Determine model path or validate
+        if model in models:
+            model_path = os.path.join(checkpoint_dir, model)
+            if not os.path.exists(model_path):
+                print(f"Downloading {model} to {model_path}...")
+                download_file(models[model], model_path)
+        elif os.path.exists(model):
+            model_path = model
+        else:
             raise ValueError(
-                f"Model must be one of {list(models.keys())}, but got {model} instead."
+                f"Model must be one of {list(models.keys())} or a valid path, but got '{model}' instead."
             )
 
-        model_path = os.path.join(checkpoint_dir, model)
-
-        if not os.path.exists(model_path):
-            print(f"Downloading {model} to {model_path}...")
-            download_file(models[model], model_path)
-
-        super().__init__(model, **kwargs)
+        # Assign the correct model path and initialize FastSAM
+        self.model_path = model_path
+        super().__init__(model=self.model_path, **kwargs)
+        print(f"Model initialized: {self.model_path}")
 
     def set_image(self, image, device=None, **kwargs):
         """Set the input image.
@@ -77,7 +87,7 @@ class SamGeo(FastSAM):
 
         self.prompt_process = FastSAMPrompt(image, everything_results, device=device)
 
-    def everything_prompt(self, output=None, **kwargs):
+    def everything_prompt(self, output=None, classes=False, **kwargs):
         """Segment the image with the everything prompt. Adapted from
         https://github.com/CASIA-IVA-Lab/FastSAM/blob/main/fastsam/prompt.py#L451
 
@@ -86,13 +96,20 @@ class SamGeo(FastSAM):
         """
 
         prompt_process = self.prompt_process
-        ann = prompt_process.everything_prompt()
-        self.annotations = ann
+        
+        dict_class, class_index, class_names, confidence, bbox_data, mask_data = prompt_process.everything_prompt()
+
+        self.class_id = class_index
+        self.confidence = confidence
+        self.classes = class_names
+        self.boxes = bbox_data
+        self.annotations = mask_data
 
         if output is not None:
-            self.save_masks(output, **kwargs)
-        else:
-            return ann
+            if classes:
+                self.save_masks_classes(output, **kwargs)
+            else:
+                self.save_masks(output, **kwargs)
 
     def point_prompt(self, points, pointlabel, output=None, **kwargs):
         """Segment the image with the point prompt. Adapted from
@@ -105,13 +122,14 @@ class SamGeo(FastSAM):
         """
 
         prompt_process = self.prompt_process
-        ann = prompt_process.point_prompt(points, pointlabel)
-        self.annotations = ann
-
+        mask_data = prompt_process.point_prompt(points, pointlabel)
+        
+        self.annotations = mask_data
+        
         if output is not None:
             self.save_masks(output, **kwargs)
         else:
-            return ann
+            return mask_data
 
     def box_prompt(self, bbox=None, bboxes=None, output=None, **kwargs):
         """Segment the image with the box prompt. Adapted from
@@ -124,13 +142,13 @@ class SamGeo(FastSAM):
         """
 
         prompt_process = self.prompt_process
-        ann = prompt_process.box_prompt(bbox, bboxes)
-        self.annotations = ann
+        mask_data = prompt_process.box_prompt(bbox, bboxes)
+        self.annotations = mask_data
 
         if output is not None:
             self.save_masks(output, **kwargs)
         else:
-            return ann
+            return mask_data
 
     def text_prompt(self, text, output=None, **kwargs):
         """Segment the image with the text prompt. Adapted from
@@ -142,13 +160,13 @@ class SamGeo(FastSAM):
         """
 
         prompt_process = self.prompt_process
-        ann = prompt_process.text_prompt(text)
-        self.annotations = ann
+        mask_data = prompt_process.text_prompt(text)
+        self.annotations = mask_data
 
         if output is not None:
             self.save_masks(output, **kwargs)
         else:
-            return ann
+            return mask_data
 
     def save_masks(
         self,
@@ -164,9 +182,17 @@ class SamGeo(FastSAM):
         Returns:
             np.ndarray: The mask of the image.
         """
-        annotations = self.annotations
+        
+        class_index = self.class_id  
+        confidence = self.confidence
+        class_names = self.classes
+        confidence = self.confidence
+        bbox_data = self.boxes    
+        annotations = self.annotations  
+
         if isinstance(annotations[0], dict):
             annotations = [annotation["segmentation"] for annotation in annotations]
+
         image = self.prompt_process.img
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
@@ -214,6 +240,97 @@ class SamGeo(FastSAM):
         else:
             return masks
 
+    def save_masks_classes(
+        self,
+        output=None,
+        better_quality=True,
+        dtype=None,
+        mask_multiplier=255,
+        **kwargs,
+    ) -> np.ndarray:
+        """Save the mask of the image along with additional metadata into a TIFF file.
+        Args:
+            output (str, optional): Path to save the output TIFF file.
+        Returns:
+            np.ndarray: The mask of the image.
+        """
+        
+        # Metadata extraction
+        class_index = self.class_id  
+        confidence  = self.confidence
+        class_names = self.classes
+        confidence  = self.confidence
+        bbox_data   = self.boxes    
+        annotations_j = self.annotations 
+
+        class_index=json.dumps(class_index.tolist())
+        confidence=json.dumps(confidence.tolist())
+        class_names=json.dumps(class_names)
+        bbox_data=json.dumps(bbox_data.tolist())
+        annotations_j=json.dumps(annotations_j.tolist()),
+    
+        annotations = self.annotations  
+
+        if isinstance(annotations[0], dict):
+            annotations = [annotation["segmentation"] for annotation in annotations]
+
+        image = self.prompt_process.img
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+        height = image.shape[0]
+        width = image.shape[1]
+
+        if better_quality:
+            if isinstance(annotations[0], torch.Tensor):
+                annotations = np.array(annotations.cpu())
+            for i, mask in enumerate(annotations):
+                mask = cv2.morphologyEx(
+                    mask.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8)
+                )
+                annotations[i] = cv2.morphologyEx(
+                    mask.astype(np.uint8), cv2.MORPH_OPEN, np.ones((8, 8), np.uint8)
+                )
+        if self.device == "cpu":
+            annotations = np.array(annotations)
+
+        else:
+            if isinstance(annotations[0], np.ndarray):
+                annotations = torch.from_numpy(annotations)
+
+        if isinstance(annotations, torch.Tensor):
+            annotations = annotations.cpu().numpy()
+
+        if dtype is None:
+            # Set output image data type based on the number of objects
+            if len(annotations) < 255:
+                dtype = np.uint8
+            elif len(annotations) < 65535:
+                dtype = np.uint16
+            else:
+                dtype = np.uint32
+
+        masks = np.sum(annotations, axis=0)
+
+        masks = cv2.resize(masks, (width, height), interpolation=cv2.INTER_NEAREST)
+        masks[masks > 0] = 1
+        masks = masks.astype(dtype) * mask_multiplier
+        self.objects = masks
+        
+        if output is not None:
+            array_to_image_classes(self.objects, 
+                                   output, 
+                                   self.source, 
+                                   masks=masks,
+                                   class_index=class_index,
+                                   confidence =confidence,
+                                   class_names=class_names,
+                                   bbox_data  =confidence, 
+                                   annotations=bbox_data,  
+                                   **kwargs)
+            
+        else:
+            return masks
+
     def fast_show_mask(
         self,
         random_color=False,
@@ -231,6 +348,8 @@ class SamGeo(FastSAM):
         target_height = self.image.shape[0]
         target_width = self.image.shape[1]
         annotations = self.annotations
+        
+        
         annotation = np.array(annotations.cpu())
 
         mask_sum = annotation.shape[0]
@@ -286,6 +405,26 @@ class SamGeo(FastSAM):
             **kwargs,
         )
 
+    def raster_to_vector_classes(
+        self, image, output, simplify_tolerance=None, dst_crs="EPSG:4326", **kwargs
+    ):
+        """Save the result to a vector file.
+
+        Args:
+            image (str): The path to the image file.
+            output (str): The path to the vector file.
+            simplify_tolerance (float, optional): The maximum allowed geometry displacement.
+                The higher this value, the smaller the number of vertices in the resulting geometry.
+        """
+
+        raster_to_vector_classes(
+            image,
+            output,
+            simplify_tolerance=simplify_tolerance,
+            dst_crs=dst_crs,
+            **kwargs,
+        )
+
     def show_anns(
         self,
         output=None,
@@ -302,6 +441,8 @@ class SamGeo(FastSAM):
         """
 
         annotations = self.annotations
+        
+        
         prompt_process = self.prompt_process
 
         if output is None:
